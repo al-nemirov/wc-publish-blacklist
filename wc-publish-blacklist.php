@@ -1,37 +1,100 @@
 <?php
 /**
  * Plugin Name: WC Publish Blacklist
- * Description: Prevents selected products from being published even after external sync.
- * Version: 1.0.0
- * Author: Alexander Nemirov
+ * Plugin URI:  https://github.com/yourusername/wc-publish-blacklist
+ * Description: Prevents selected WooCommerce products from being published even after external sync (MoySklad, WooMS, etc.).
+ * Version:     1.0.0
+ * Author:      Alexander Nemirov
+ * Author URI:  https://github.com/yourusername
  * Text Domain: wc-publish-blacklist
+ * Domain Path: /languages
+ * Requires at least: 5.0
+ * Requires PHP: 7.4
  * Requires Plugins: woocommerce
+ * License:     MIT
+ * License URI: https://opensource.org/licenses/MIT
+ *
+ * @package WC_Publish_Blacklist
  */
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
 
+/**
+ * Основной класс плагина WC Publish Blacklist.
+ *
+ * Управляет чёрным списком товаров WooCommerce, запрещая их публикацию.
+ * Перехватывает хуки сохранения и смены статуса записей, автоматически
+ * возвращая заблокированные товары в статус «Черновик».
+ *
+ * @since   1.0.0
+ * @package WC_Publish_Blacklist
+ */
 class WC_Publish_Blacklist {
 
-    const OPTION_KEY   = 'wc_publish_blacklist_ids';
-    const META_KEY     = '_wc_publish_blacklisted';
-    const MENU_SLUG    = 'wc-publish-blacklist';
+    /**
+     * Ключ опции для хранения массива ID заблокированных товаров.
+     *
+     * @since 1.0.0
+     * @var string
+     */
+    const OPTION_KEY = 'wc_publish_blacklist_ids';
 
+    /**
+     * Мета-ключ, устанавливаемый для каждого заблокированного товара.
+     *
+     * @since 1.0.0
+     * @var string
+     */
+    const META_KEY = '_wc_publish_blacklisted';
+
+    /**
+     * Slug страницы плагина в меню WooCommerce.
+     *
+     * @since 1.0.0
+     * @var string
+     */
+    const MENU_SLUG = 'wc-publish-blacklist';
+
+    /**
+     * Конструктор: регистрирует все хуки и AJAX-обработчики.
+     *
+     * @since 1.0.0
+     */
     public function __construct() {
+        // Регистрация подменю в WooCommerce
         add_action( 'admin_menu', [ $this, 'add_menu' ] );
+
+        // Подключение скриптов на странице плагина
         add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_scripts' ] );
+
+        // AJAX: поиск товаров
         add_action( 'wp_ajax_wcpbl_search_products', [ $this, 'ajax_search_products' ] );
+
+        // AJAX: добавление в чёрный список
         add_action( 'wp_ajax_wcpbl_add_to_blacklist', [ $this, 'ajax_add_to_blacklist' ] );
+
+        // AJAX: удаление из чёрного списка
         add_action( 'wp_ajax_wcpbl_remove_from_blacklist', [ $this, 'ajax_remove_from_blacklist' ] );
 
-        // Block on any post save
+        // Блокировка публикации при сохранении товара (приоритет 999 — выполняется последним)
         add_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999, 2 );
 
-        // Block on status transition (external syncs)
+        // Блокировка публикации при смене статуса (внешняя синхронизация)
         add_action( 'transition_post_status', [ $this, 'enforce_blacklist_on_transition' ], 999, 3 );
     }
 
     // ─── Menu ────────────────────────────────────────────────────────────────
 
+    /**
+     * Регистрирует подменю «Blacklist» в разделе WooCommerce.
+     *
+     * Доступ ограничен правом manage_woocommerce.
+     *
+     * @since  1.0.0
+     * @return void
+     */
     public function add_menu() {
         add_submenu_page(
             'woocommerce',
@@ -45,9 +108,22 @@ class WC_Publish_Blacklist {
 
     // ─── Page ─────────────────────────────────────────────────────────────
 
+    /**
+     * Отрисовывает страницу управления чёрным списком.
+     *
+     * Загружает текущий список заблокированных товаров, получает данные
+     * о каждом товаре (имя, артикул, статус) и выводит HTML-разметку
+     * с таблицей и формой поиска. Включает встроенные CSS и JS.
+     *
+     * @since  1.0.0
+     * @return void
+     */
     public function render_page() {
+        // Получаем массив ID из чёрного списка
         $blacklist = $this->get_blacklist();
         $products  = [];
+
+        // Собираем данные о каждом товаре
         foreach ( $blacklist as $id ) {
             $p = wc_get_product( $id );
             if ( $p ) {
@@ -144,7 +220,7 @@ class WC_Publish_Blacklist {
                 return d.innerHTML;
             }
 
-            // ── Search ──────────────────────────────────────────────────────
+            // ── Поиск товаров ──────────────────────────────────────────────
             function doSearch() {
                 const q = $('#wcpbl-search-input').val().trim();
                 if (!q) return;
@@ -173,7 +249,7 @@ class WC_Publish_Blacklist {
             $('#wcpbl-search-btn').on('click', doSearch);
             $('#wcpbl-search-input').on('keypress', e => { if(e.key==='Enter') doSearch(); });
 
-            // ── Add ───────────────────────────────────────────────────
+            // ── Добавление в чёрный список ─────────────────────────────────
             $(document).on('click', '.wcpbl-add-btn', function(){
                 const id   = $(this).data('id');
                 const name = $(this).data('name');
@@ -190,7 +266,7 @@ class WC_Publish_Blacklist {
                 });
             });
 
-            // ── Remove ────────────────────────────────────────────────────
+            // ── Удаление из чёрного списка ─────────────────────────────────
             $(document).on('click', '.wcpbl-remove-btn', function(){
                 if (!confirm('Remove product from blacklist?')) return;
                 const id   = $(this).data('id');
@@ -207,12 +283,22 @@ class WC_Publish_Blacklist {
 
     // ─── AJAX: search ─────────────────────────────────────────────────────────
 
+    /**
+     * AJAX-обработчик: поиск товаров по названию и артикулу (SKU).
+     *
+     * Выполняет поиск через WP_Query (по названию) и wc_get_products (по SKU),
+     * объединяет результаты с дедупликацией и возвращает JSON-массив.
+     *
+     * @since  1.0.0
+     * @return void Отправляет JSON-ответ и завершает выполнение.
+     */
     public function ajax_search_products() {
         check_ajax_referer( 'wcpbl_nonce', 'nonce' );
         if ( ! current_user_can('manage_woocommerce') ) wp_send_json_error('Access denied');
 
         $q = sanitize_text_field( $_POST['q'] ?? '' );
 
+        // Поиск по названию через WP_Query
         $args = [
             'post_type'      => 'product',
             'post_status'    => [ 'publish','draft','private','pending' ],
@@ -220,13 +306,14 @@ class WC_Publish_Blacklist {
             's'              => $q,
         ];
 
-        // Also search by SKU
+        // Дополнительный поиск по артикулу (SKU)
         $by_sku = wc_get_products([ 'sku' => $q, 'limit' => 10 ]);
 
         $posts  = get_posts( $args );
         $ids_seen = [];
         $results  = [];
 
+        // Метки статусов для отображения
         $status_labels = [
             'publish' => 'Published',
             'draft'   => 'Draft',
@@ -234,6 +321,7 @@ class WC_Publish_Blacklist {
             'pending' => 'Pending',
         ];
 
+        // Объединяем результаты с дедупликацией по ID
         foreach ( array_merge( $by_sku, array_map('wc_get_product', $posts) ) as $p ) {
             if ( ! $p || isset($ids_seen[$p->get_id()]) ) continue;
             $ids_seen[$p->get_id()] = true;
@@ -251,6 +339,15 @@ class WC_Publish_Blacklist {
 
     // ─── AJAX: add to blacklist ──────────────────────────────────────────────
 
+    /**
+     * AJAX-обработчик: добавление товара в чёрный список.
+     *
+     * Добавляет ID товара в опцию и устанавливает мета-флаг.
+     * Если товар уже опубликован, немедленно переводит в черновик.
+     *
+     * @since  1.0.0
+     * @return void Отправляет JSON-ответ и завершает выполнение.
+     */
     public function ajax_add_to_blacklist() {
         check_ajax_referer( 'wcpbl_nonce', 'nonce' );
         if ( ! current_user_can('manage_woocommerce') ) wp_send_json_error('Access denied');
@@ -259,14 +356,17 @@ class WC_Publish_Blacklist {
         if ( ! $id ) wp_send_json_error('Invalid ID');
 
         $list = $this->get_blacklist();
+
+        // Добавляем только если ещё нет в списке
         if ( ! in_array($id, $list) ) {
             $list[] = $id;
             update_option( self::OPTION_KEY, $list );
             update_post_meta( $id, self::META_KEY, 1 );
         }
 
-        // Immediately unpublish
+        // Немедленно снимаем с публикации, если товар опубликован
         if ( get_post_status($id) === 'publish' ) {
+            // Отключаем хук, чтобы избежать рекурсии
             remove_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999 );
             wp_update_post([ 'ID' => $id, 'post_status' => 'draft' ]);
             add_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999, 2 );
@@ -277,11 +377,22 @@ class WC_Publish_Blacklist {
 
     // ─── AJAX: remove from blacklist ───────────────────────────────────────────
 
+    /**
+     * AJAX-обработчик: удаление товара из чёрного списка.
+     *
+     * Удаляет ID товара из опции и снимает мета-флаг.
+     * После удаления товар снова может быть опубликован.
+     *
+     * @since  1.0.0
+     * @return void Отправляет JSON-ответ и завершает выполнение.
+     */
     public function ajax_remove_from_blacklist() {
         check_ajax_referer( 'wcpbl_nonce', 'nonce' );
         if ( ! current_user_can('manage_woocommerce') ) wp_send_json_error('Access denied');
 
         $id   = absint( $_POST['id'] ?? 0 );
+
+        // Удаляем ID из массива и переиндексируем
         $list = array_filter( $this->get_blacklist(), function($i) use ($id) { return $i !== $id; } );
         update_option( self::OPTION_KEY, array_values($list) );
         delete_post_meta( $id, self::META_KEY );
@@ -291,9 +402,22 @@ class WC_Publish_Blacklist {
 
     // ─── Enforce draft on save ────────────────────────────────────────────────
 
+    /**
+     * Принудительно возвращает товар в черновик при сохранении.
+     *
+     * Срабатывает на хуке save_post_product с приоритетом 999,
+     * чтобы выполниться после всех остальных обработчиков (включая синхронизацию).
+     * Отключает собственный хук перед обновлением, чтобы избежать бесконечной рекурсии.
+     *
+     * @since  1.0.0
+     * @param  int      $post_id ID сохраняемого товара.
+     * @param  \WP_Post $post    Объект записи товара.
+     * @return void
+     */
     public function enforce_blacklist_on_save( $post_id, $post ) {
+        // Проверяем: товар в чёрном списке и пытается стать опубликованным
         if ( $this->is_blacklisted($post_id) && $post->post_status === 'publish' ) {
-            // Remove hook to prevent infinite loop
+            // Отключаем хук, чтобы предотвратить бесконечный цикл
             remove_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999 );
             wp_update_post([ 'ID' => $post_id, 'post_status' => 'draft' ]);
             add_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999, 2 );
@@ -302,12 +426,30 @@ class WC_Publish_Blacklist {
 
     // ─── Enforce draft on transition (external syncs) ────────────────────────
 
+    /**
+     * Принудительно возвращает товар в черновик при смене статуса.
+     *
+     * Срабатывает на хуке transition_post_status с приоритетом 999.
+     * Перехватывает любые попытки перевода товара в статус «publish»,
+     * включая изменения через REST API и внешние системы синхронизации.
+     *
+     * @since  1.0.0
+     * @param  string   $new_status Новый статус записи.
+     * @param  string   $old_status Предыдущий статус записи.
+     * @param  \WP_Post $post       Объект записи.
+     * @return void
+     */
     public function enforce_blacklist_on_transition( $new_status, $old_status, $post ) {
+        // Пропускаем не-товары
         if ( $post->post_type !== 'product' ) return;
+
+        // Пропускаем, если новый статус не «publish»
         if ( $new_status !== 'publish' ) return;
+
+        // Пропускаем, если товар не в чёрном списке
         if ( ! $this->is_blacklisted($post->ID) ) return;
 
-        // Immediately revert — remove hooks to prevent loop
+        // Немедленно откатываем — отключаем хук для предотвращения рекурсии
         remove_action( 'transition_post_status', [ $this, 'enforce_blacklist_on_transition' ], 999 );
         wp_update_post([ 'ID' => $post->ID, 'post_status' => 'draft' ]);
         add_action( 'transition_post_status', [ $this, 'enforce_blacklist_on_transition' ], 999, 3 );
@@ -315,14 +457,34 @@ class WC_Publish_Blacklist {
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * Возвращает массив ID товаров из чёрного списка.
+     *
+     * @since  1.0.0
+     * @return array<int> Массив ID заблокированных товаров.
+     */
     private function get_blacklist(): array {
         return (array) get_option( self::OPTION_KEY, [] );
     }
 
+    /**
+     * Проверяет, находится ли товар в чёрном списке.
+     *
+     * @since  1.0.0
+     * @param  int $id ID товара для проверки.
+     * @return bool True, если товар в чёрном списке.
+     */
     private function is_blacklisted( int $id ): bool {
         return in_array( $id, $this->get_blacklist(), true );
     }
 
+    /**
+     * Возвращает читаемую метку статуса записи.
+     *
+     * @since  1.0.0
+     * @param  string $status Статус записи WordPress (publish, draft, private, pending).
+     * @return string Человекочитаемая метка статуса.
+     */
     private function status_label( string $status ): string {
         return [
             'publish' => 'Published',
@@ -332,10 +494,22 @@ class WC_Publish_Blacklist {
         ][$status] ?? $status;
     }
 
+    /**
+     * Подключает необходимые скрипты на странице плагина.
+     *
+     * Загружает jQuery только на странице управления чёрным списком,
+     * проверяя slug текущей страницы.
+     *
+     * @since  1.0.0
+     * @param  string $hook Slug текущей страницы администратора.
+     * @return void
+     */
     public function enqueue_scripts( $hook ) {
+        // Подключаем скрипты только на странице плагина
         if ( strpos($hook, self::MENU_SLUG) === false ) return;
         wp_enqueue_script('jquery');
     }
 }
 
+// Инициализация плагина
 new WC_Publish_Blacklist();
