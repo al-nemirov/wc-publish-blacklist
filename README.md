@@ -53,7 +53,7 @@ When auto-syncing catalogs from MoySklad or WooMS, some products get published a
 
 ```bash
 cd wp-content/plugins/
-git clone https://github.com/yourusername/wc-publish-blacklist.git
+git clone https://github.com/al-nemirov/wc-publish-blacklist.git
 ```
 
 Activate the plugin from the WordPress admin panel.
@@ -160,7 +160,7 @@ Please make sure your code follows the [WordPress Coding Standards](https://deve
 
 ```bash
 cd wp-content/plugins/
-git clone https://github.com/yourusername/wc-publish-blacklist.git
+git clone https://github.com/al-nemirov/wc-publish-blacklist.git
 ```
 
 Активируйте плагин через панель администратора WordPress.

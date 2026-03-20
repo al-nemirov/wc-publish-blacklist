@@ -1,11 +1,11 @@
 <?php
 /**
  * Plugin Name: WC Publish Blacklist
- * Plugin URI:  https://github.com/yourusername/wc-publish-blacklist
+ * Plugin URI:  https://github.com/al-nemirov/wc-publish-blacklist
  * Description: Prevents selected WooCommerce products from being published even after external sync (MoySklad, WooMS, etc.).
  * Version:     1.0.0
  * Author:      Alexander Nemirov
- * Author URI:  https://github.com/yourusername
+ * Author URI:  https://github.com/al-nemirov
  * Text Domain: wc-publish-blacklist
  * Domain Path: /languages
  * Requires at least: 5.0
