@@ -42,12 +42,40 @@ class WC_Publish_Blacklist {
     const OPTION_KEY = 'wc_publish_blacklist_ids';
 
     /**
-     * Мета-ключ, устанавливаемый для каждого заблокированного товара.
+     * Устаревший мета-ключ (использовался до версии 1.1.0).
      *
-     * @since 1.0.0
+     * Хранится для одноразовой миграции: очистки старых post_meta записей.
+     * Единственный источник истины — опция OPTION_KEY.
+     *
+     * @since      1.0.0
+     * @deprecated 1.1.0 Blacklist data consolidated into OPTION_KEY only.
      * @var string
      */
-    const META_KEY = '_wc_publish_blacklisted';
+    const LEGACY_META_KEY = '_wc_publish_blacklisted';
+
+    /**
+     * Ключ опции-флага, сигнализирующего о завершении миграции мета-ключей.
+     *
+     * @since 1.1.0
+     * @var string
+     */
+    const MIGRATION_OPTION = 'wc_publish_blacklist_meta_migrated';
+
+    /**
+     * Ключ опции для хранения журнала действий (аудит).
+     *
+     * @since 1.1.0
+     * @var string
+     */
+    const LOG_OPTION_KEY = 'wc_publish_blacklist_log';
+
+    /**
+     * Максимальное количество записей в журнале действий.
+     *
+     * @since 1.1.0
+     * @var int
+     */
+    const LOG_MAX_ENTRIES = 200;
 
     /**
      * Slug страницы плагина в меню WooCommerce.
@@ -63,6 +91,9 @@ class WC_Publish_Blacklist {
      * @since 1.0.0
      */
     public function __construct() {
+        // Одноразовая миграция: очистка устаревших post_meta записей
+        add_action( 'admin_init', [ $this, 'maybe_migrate_legacy_meta' ] );
+
         // Регистрация подменю в WooCommerce
         add_action( 'admin_menu', [ $this, 'add_menu' ] );
 
@@ -148,7 +179,7 @@ class WC_Publish_Blacklist {
                 <h2 style="margin-top:0;">Add product to blacklist</h2>
                 <div style="display:flex;gap:8px;">
                     <input type="text" id="wcpbl-search-input"
-                           placeholder="Enter product name or SKU..."
+                           placeholder="Enter product name or SKU (min 3 chars)..."
                            class="regular-text" style="flex:1;" />
                     <button type="button" class="button button-primary" id="wcpbl-search-btn">Search</button>
                 </div>
@@ -220,14 +251,34 @@ class WC_Publish_Blacklist {
                 return d.innerHTML;
             }
 
+            // ── Debounce-обёртка ────────────────────────────────────────────
+            function debounce(fn, delay) {
+                let timer;
+                return function() {
+                    clearTimeout(timer);
+                    timer = setTimeout(() => fn.apply(this, arguments), delay);
+                };
+            }
+
+            const MIN_QUERY_LENGTH = 3;
+
             // ── Поиск товаров ──────────────────────────────────────────────
             function doSearch() {
                 const q = $('#wcpbl-search-input').val().trim();
-                if (!q) return;
-                const $res = $('#wcpbl-search-results').html('<em>Searching...</em>');
+                const $res = $('#wcpbl-search-results');
+                if (q.length < MIN_QUERY_LENGTH) {
+                    if (q.length > 0) {
+                        $res.html('<p style="color:#888;">Enter at least ' + MIN_QUERY_LENGTH + ' characters</p>');
+                    } else {
+                        $res.html('');
+                    }
+                    return;
+                }
+                $res.html('<em>Searching...</em>');
                 $.post(ajaxurl, { action:'wcpbl_search_products', q, nonce }, function(r){
                     if (!r.success || !r.data.length) {
-                        $res.html('<p style="color:#d63638;">Nothing found</p>');
+                        const msg = (r.data && typeof r.data === 'string') ? esc(r.data) : 'Nothing found';
+                        $res.html('<p style="color:#d63638;">' + msg + '</p>');
                         return;
                     }
                     let html = '';
@@ -246,8 +297,11 @@ class WC_Publish_Blacklist {
                 });
             }
 
+            const debouncedSearch = debounce(doSearch, 400);
+
             $('#wcpbl-search-btn').on('click', doSearch);
-            $('#wcpbl-search-input').on('keypress', e => { if(e.key==='Enter') doSearch(); });
+            $('#wcpbl-search-input').on('keyup', debouncedSearch);
+            $('#wcpbl-search-input').on('keypress', e => { if(e.key==='Enter') { e.preventDefault(); doSearch(); } });
 
             // ── Добавление в чёрный список ─────────────────────────────────
             $(document).on('click', '.wcpbl-add-btn', function(){
@@ -294,20 +348,35 @@ class WC_Publish_Blacklist {
      */
     public function ajax_search_products() {
         check_ajax_referer( 'wcpbl_nonce', 'nonce' );
-        if ( ! current_user_can('manage_woocommerce') ) wp_send_json_error('Access denied');
+        if ( ! current_user_can( 'manage_woocommerce' ) ) wp_send_json_error( 'Access denied' );
 
         $q = sanitize_text_field( $_POST['q'] ?? '' );
+
+        // Минимальная длина запроса — 3 символа
+        if ( mb_strlen( $q ) < 3 ) {
+            wp_send_json_error( 'Please enter at least 3 characters' );
+        }
+
+        // Серверный rate-limit: не чаще 1 запроса в секунду на пользователя
+        $user_id       = get_current_user_id();
+        $transient_key = 'wcpbl_search_' . $user_id;
+        if ( get_transient( $transient_key ) ) {
+            wp_send_json_error( 'Too many requests. Please wait a moment.' );
+        }
+        set_transient( $transient_key, 1, 1 );
+
+        $results_limit = 10;
 
         // Поиск по названию через WP_Query
         $args = [
             'post_type'      => 'product',
-            'post_status'    => [ 'publish','draft','private','pending' ],
-            'posts_per_page' => 20,
+            'post_status'    => [ 'publish', 'draft', 'private', 'pending' ],
+            'posts_per_page' => $results_limit,
             's'              => $q,
         ];
 
         // Дополнительный поиск по артикулу (SKU)
-        $by_sku = wc_get_products([ 'sku' => $q, 'limit' => 10 ]);
+        $by_sku = wc_get_products( [ 'sku' => $q, 'limit' => $results_limit ] );
 
         $posts  = get_posts( $args );
         $ids_seen = [];
@@ -321,10 +390,11 @@ class WC_Publish_Blacklist {
             'pending' => 'Pending',
         ];
 
-        // Объединяем результаты с дедупликацией по ID
-        foreach ( array_merge( $by_sku, array_map('wc_get_product', $posts) ) as $p ) {
-            if ( ! $p || isset($ids_seen[$p->get_id()]) ) continue;
-            $ids_seen[$p->get_id()] = true;
+        // Объединяем результаты с дедупликацией по ID, ограничиваем общее число
+        foreach ( array_merge( $by_sku, array_map( 'wc_get_product', $posts ) ) as $p ) {
+            if ( ! $p || isset( $ids_seen[ $p->get_id() ] ) ) continue;
+            if ( count( $results ) >= $results_limit ) break;
+            $ids_seen[ $p->get_id() ] = true;
             $results[] = [
                 'id'           => $p->get_id(),
                 'name'         => $p->get_name(),
@@ -342,7 +412,7 @@ class WC_Publish_Blacklist {
     /**
      * AJAX-обработчик: добавление товара в чёрный список.
      *
-     * Добавляет ID товара в опцию и устанавливает мета-флаг.
+     * Добавляет ID товара в опцию (единственный источник истины).
      * Если товар уже опубликован, немедленно переводит в черновик.
      *
      * @since  1.0.0
@@ -355,21 +425,28 @@ class WC_Publish_Blacklist {
         $id = absint( $_POST['id'] ?? 0 );
         if ( ! $id ) wp_send_json_error('Invalid ID');
 
+        if ( get_post_type( $id ) !== 'product' ) {
+            wp_send_json_error( 'Post is not a WooCommerce product' );
+        }
+
         $list = $this->get_blacklist();
 
         // Добавляем только если ещё нет в списке
-        if ( ! in_array($id, $list) ) {
+        if ( ! in_array( $id, $list ) ) {
             $list[] = $id;
             update_option( self::OPTION_KEY, $list );
-            update_post_meta( $id, self::META_KEY, 1 );
+
+            $this->log_action( $id, 'added_to_blacklist', 'Manually added via admin UI' );
         }
 
         // Немедленно снимаем с публикации, если товар опубликован
-        if ( get_post_status($id) === 'publish' ) {
+        if ( get_post_status( $id ) === 'publish' ) {
             // Отключаем хук, чтобы избежать рекурсии
             remove_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999 );
-            wp_update_post([ 'ID' => $id, 'post_status' => 'draft' ]);
+            wp_update_post( [ 'ID' => $id, 'post_status' => 'draft' ] );
             add_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999, 2 );
+
+            $this->log_action( $id, 'publish_blocked', 'Auto-drafted on blacklist add (was published)' );
         }
 
         wp_send_json_success();
@@ -380,7 +457,7 @@ class WC_Publish_Blacklist {
     /**
      * AJAX-обработчик: удаление товара из чёрного списка.
      *
-     * Удаляет ID товара из опции и снимает мета-флаг.
+     * Удаляет ID товара из опции.
      * После удаления товар снова может быть опубликован.
      *
      * @since  1.0.0
@@ -390,12 +467,18 @@ class WC_Publish_Blacklist {
         check_ajax_referer( 'wcpbl_nonce', 'nonce' );
         if ( ! current_user_can('manage_woocommerce') ) wp_send_json_error('Access denied');
 
-        $id   = absint( $_POST['id'] ?? 0 );
+        $id = absint( $_POST['id'] ?? 0 );
+        if ( ! $id ) wp_send_json_error( 'Invalid ID' );
+
+        if ( get_post_type( $id ) !== 'product' ) {
+            wp_send_json_error( 'Post is not a WooCommerce product' );
+        }
 
         // Удаляем ID из массива и переиндексируем
-        $list = array_filter( $this->get_blacklist(), function($i) use ($id) { return $i !== $id; } );
-        update_option( self::OPTION_KEY, array_values($list) );
-        delete_post_meta( $id, self::META_KEY );
+        $list = array_filter( $this->get_blacklist(), function( $i ) use ( $id ) { return $i !== $id; } );
+        update_option( self::OPTION_KEY, array_values( $list ) );
+
+        $this->log_action( $id, 'removed_from_blacklist', 'Manually removed via admin UI' );
 
         wp_send_json_success();
     }
@@ -416,11 +499,13 @@ class WC_Publish_Blacklist {
      */
     public function enforce_blacklist_on_save( $post_id, $post ) {
         // Проверяем: товар в чёрном списке и пытается стать опубликованным
-        if ( $this->is_blacklisted($post_id) && $post->post_status === 'publish' ) {
+        if ( $this->is_blacklisted( $post_id ) && $post->post_status === 'publish' ) {
             // Отключаем хук, чтобы предотвратить бесконечный цикл
             remove_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999 );
-            wp_update_post([ 'ID' => $post_id, 'post_status' => 'draft' ]);
+            wp_update_post( [ 'ID' => $post_id, 'post_status' => 'draft' ] );
             add_action( 'save_post_product', [ $this, 'enforce_blacklist_on_save' ], 999, 2 );
+
+            $this->log_action( $post_id, 'publish_blocked', 'Blocked on save_post_product hook' );
         }
     }
 
@@ -447,15 +532,89 @@ class WC_Publish_Blacklist {
         if ( $new_status !== 'publish' ) return;
 
         // Пропускаем, если товар не в чёрном списке
-        if ( ! $this->is_blacklisted($post->ID) ) return;
+        if ( ! $this->is_blacklisted( $post->ID ) ) return;
 
         // Немедленно откатываем — отключаем хук для предотвращения рекурсии
         remove_action( 'transition_post_status', [ $this, 'enforce_blacklist_on_transition' ], 999 );
-        wp_update_post([ 'ID' => $post->ID, 'post_status' => 'draft' ]);
+        wp_update_post( [ 'ID' => $post->ID, 'post_status' => 'draft' ] );
         add_action( 'transition_post_status', [ $this, 'enforce_blacklist_on_transition' ], 999, 3 );
+
+        $this->log_action(
+            $post->ID,
+            'publish_blocked',
+            sprintf( 'Blocked on status transition %s -> publish', $old_status )
+        );
+    }
+
+    // ─── Migration ────────────────────────────────────────────────────────────
+
+    /**
+     * Одноразовая миграция: удаляет устаревшие post_meta записи.
+     *
+     * До версии 1.1.0 данные хранились дублированно: в wp_options и в post_meta.
+     * Теперь единственный источник истины — опция OPTION_KEY.
+     * Эта миграция удаляет все старые мета-значения _wc_publish_blacklisted.
+     *
+     * @since  1.1.0
+     * @return void
+     */
+    public function maybe_migrate_legacy_meta() {
+        if ( get_option( self::MIGRATION_OPTION ) ) {
+            return;
+        }
+
+        global $wpdb;
+
+        // Удаляем все устаревшие мета-записи одним запросом
+        $wpdb->delete(
+            $wpdb->postmeta,
+            [ 'meta_key' => self::LEGACY_META_KEY ],
+            [ '%s' ]
+        );
+
+        update_option( self::MIGRATION_OPTION, 1, true );
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Записывает событие в журнал аудита.
+     *
+     * Хранит до LOG_MAX_ENTRIES записей в опции wp_options.
+     * Каждая запись содержит: дату, пользователя, ID/название товара и причину.
+     *
+     * @since  1.1.0
+     * @param  int    $product_id ID товара.
+     * @param  string $action     Тип действия (added_to_blacklist, removed_from_blacklist, publish_blocked).
+     * @param  string $reason     Описание причины / контекст.
+     * @return void
+     */
+    private function log_action( int $product_id, string $action, string $reason = '' ) {
+        $log = (array) get_option( self::LOG_OPTION_KEY, [] );
+
+        $user    = wp_get_current_user();
+        $product = wc_get_product( $product_id );
+
+        $entry = [
+            'timestamp'    => current_time( 'mysql' ),
+            'timestamp_gmt'=> current_time( 'mysql', true ),
+            'user_id'      => $user->ID ?? 0,
+            'user_login'   => $user->user_login ?? 'system',
+            'product_id'   => $product_id,
+            'product_title'=> $product ? $product->get_name() : get_the_title( $product_id ),
+            'action'       => $action,
+            'reason'       => $reason,
+        ];
+
+        $log[] = $entry;
+
+        // Обрезаем до максимального количества записей
+        if ( count( $log ) > self::LOG_MAX_ENTRIES ) {
+            $log = array_slice( $log, -self::LOG_MAX_ENTRIES );
+        }
+
+        update_option( self::LOG_OPTION_KEY, $log, false );
+    }
 
     /**
      * Возвращает массив ID товаров из чёрного списка.
