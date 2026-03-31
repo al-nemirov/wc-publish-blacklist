@@ -203,18 +203,18 @@ class WC_Publish_Blacklist {
                     </thead>
                     <tbody id="wcpbl-list">
                     <?php foreach ( $products as $p ) : ?>
-                        <tr id="wcpbl-row-<?php echo $p['id']; ?>">
-                            <td><?php echo $p['id']; ?></td>
+                        <tr id="wcpbl-row-<?php echo (int) $p['id']; ?>">
+                            <td><?php echo (int) $p['id']; ?></td>
                             <td><a href="<?php echo esc_url($p['edit']); ?>" target="_blank"><?php echo esc_html($p['name']); ?></a></td>
                             <td><code><?php echo esc_html($p['sku']); ?></code></td>
                             <td>
-                                <span class="wcpbl-status wcpbl-status-<?php echo $p['status']; ?>">
+                                <span class="wcpbl-status wcpbl-status-<?php echo esc_attr($p['status']); ?>">
                                     <?php echo $this->status_label($p['status']); ?>
                                 </span>
                             </td>
                             <td>
                                 <button type="button" class="button button-small wcpbl-remove-btn"
-                                        data-id="<?php echo $p['id']; ?>">
+                                        data-id="<?php echo (int) $p['id']; ?>">
                                     Remove
                                 </button>
                             </td>
